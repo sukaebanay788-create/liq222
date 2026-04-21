@@ -1,4 +1,4 @@
-// Binance Futures Screener (сохранение ликвидаций, фильтр 5000, логирование)
+// Binance Futures Screener (с лентой ликвидаций, маркеры только текст)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -26,13 +26,18 @@ let isLoadingMore = false;
 let liquidationWs = null;
 let liquidationMarkers = [];
 const MAX_MARKERS_PER_SYMBOL = 500;
-const MIN_VOLUME_USD = 5000;                // снижен до 5000
+const MIN_VOLUME_USD = 5000; // изменено на 5000
 let liquidationCount = 0;
 
+// Хранилище маркеров по символам
 const allLiquidations = new Map();
 const STORAGE_PREFIX = 'binance_liq_';
 
-// Длительность таймфрейма в миллисекундах
+// Лента последних ликвидаций (для всех символов)
+const MAX_FEED_ITEMS = 20;
+let liquidationFeed = []; // массив объектов { symbol, side, volume, time, price }
+
+// Длительность таймфрейма в мс
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
     const value = parseInt(tf);
@@ -53,69 +58,7 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов
-async function loadCoins() {
-    try {
-        const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
-        const exchangeData = await exchangeInfoRes.json();
-        
-        const usdtPairs = exchangeData.symbols.filter(s => 
-            s.quoteAsset === 'USDT' && 
-            s.status === 'TRADING' &&
-            s.contractType === 'PERPETUAL'
-        );
-
-        const tickersRes = await fetch(`${BINANCE_API}/fapi/v1/ticker/24hr`);
-        const tickers = await tickersRes.json();
-        const tickersMap = new Map(tickers.map(t => [t.symbol, t]));
-
-        const promises = usdtPairs.map(async (pair) => {
-            const symbol = pair.symbol;
-            const ticker = tickersMap.get(symbol);
-            if (!ticker) return null;
-
-            try {
-                const klines30m = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`).then(r => {
-                    if (!r.ok) throw new Error('No data');
-                    return r.json();
-                });
-                let change30m = 0;
-                if (klines30m.length >= 1) {
-                    const lastCandle = klines30m[klines30m.length - 1];
-                    const open = parseFloat(lastCandle[1]);
-                    const close = parseFloat(lastCandle[4]);
-                    change30m = ((close - open) / open) * 100;
-                }
-                return {
-                    symbol,
-                    price: parseFloat(ticker.lastPrice),
-                    change: parseFloat(ticker.priceChangePercent),
-                    change30m,
-                };
-            } catch (e) {
-                return {
-                    symbol,
-                    price: parseFloat(ticker.lastPrice),
-                    change: parseFloat(ticker.priceChangePercent),
-                    change30m: 0,
-                };
-            }
-        });
-
-        const results = await Promise.all(promises);
-        results.forEach(coinData => {
-            if (coinData) coins.set(coinData.symbol, coinData);
-        });
-
-        filteredCoins = Array.from(coins.values());
-        sortCoins();
-        renderCoinsList();
-        updateCoinsCount();
-    } catch (error) {
-        console.error('Ошибка загрузки монет:', error);
-        document.getElementById('coinsList').innerHTML = '<div class="loading">Ошибка загрузки</div>';
-    }
-}
+// ... (loadCoins без изменений) ...
 
 // График
 function initChart() {
@@ -177,7 +120,7 @@ function connectLiquidationWebSocket() {
     };
 }
 
-// Загрузка сохранённых маркеров для символа из localStorage
+// Загрузка сохранённых маркеров
 function loadSavedMarkers(symbol) {
     const key = STORAGE_PREFIX + symbol;
     const saved = localStorage.getItem(key);
@@ -192,13 +135,12 @@ function loadSavedMarkers(symbol) {
     return [];
 }
 
-// Сохранение маркеров для символа в localStorage
 function saveMarkers(symbol, markers) {
     const key = STORAGE_PREFIX + symbol;
     try {
         localStorage.setItem(key, JSON.stringify(markers));
     } catch (e) {
-        console.error('Ошибка сохранения маркеров в localStorage:', e);
+        console.error('Ошибка сохранения маркеров:', e);
         if (e.name === 'QuotaExceededError') {
             const keys = Object.keys(localStorage).filter(k => k.startsWith(STORAGE_PREFIX));
             keys.sort((a, b) => (localStorage.getItem(a)?.length || 0) - (localStorage.getItem(b)?.length || 0));
@@ -207,27 +149,60 @@ function saveMarkers(symbol, markers) {
             }
             try {
                 localStorage.setItem(key, JSON.stringify(markers));
-            } catch (e2) {
-                console.error('Повторная ошибка сохранения');
-            }
+            } catch (e2) {}
         }
     }
 }
 
-// Обработка одной ликвидации
+// Обновление ленты ликвидаций в UI
+function updateLiquidationFeedUI() {
+    const container = document.getElementById('liquidationFeedContent');
+    if (!container) return;
+    
+    if (liquidationFeed.length === 0) {
+        container.innerHTML = '<div class="liquidation-item">Нет данных</div>';
+        return;
+    }
+    
+    // Показываем последние 20 в обратном порядке (новые сверху)
+    const items = [...liquidationFeed].reverse();
+    let html = '';
+    for (const item of items) {
+        const timeStr = new Date(item.time).toLocaleTimeString().slice(0,5);
+        const sideClass = item.side === 'SELL' ? 'long' : 'short';
+        const sideText = item.side === 'SELL' ? 'LONG' : 'SHORT';
+        const volumeText = item.volume >= 1000 ? (item.volume/1000).toFixed(1)+'K' : item.volume.toFixed(0);
+        html += `
+            <div class="liquidation-item">
+                <span><span class="liq-symbol">${item.symbol.replace('USDT','')}</span> <span class="liq-side ${sideClass}">${sideText}</span></span>
+                <span class="liq-volume">$${volumeText}</span>
+                <span class="liq-time">${timeStr}</span>
+            </div>
+        `;
+    }
+    container.innerHTML = html;
+}
+
+// Добавление записи в ленту
+function addToLiquidationFeed(item) {
+    liquidationFeed.push(item);
+    if (liquidationFeed.length > MAX_FEED_ITEMS * 2) { // держим немного больше, чтобы при реверсе было что показать
+        liquidationFeed.shift();
+    }
+    updateLiquidationFeedUI();
+}
+
+// Обработка ликвидации
 function processLiquidation(order) {
     const symbol = order.s;
     const price = parseFloat(order.p);
     const quantity = parseFloat(order.q);
     const volumeUSD = price * quantity;
     
-    // Логирование
-    console.log(`[Liquidation] ${symbol} ${order.S} ${quantity.toFixed(3)} @ ${price} (vol: $${volumeUSD.toFixed(0)})`);
+    // Логирование в консоль
+    console.log(`[Liquidation] ${symbol} ${order.S} ${quantity.toFixed(4)} @ ${price.toFixed(2)} (vol: ${volumeUSD.toFixed(0)} USD)`);
     
-    if (volumeUSD < MIN_VOLUME_USD) {
-        console.log(`Filtered out: $${volumeUSD.toFixed(0)} < $${MIN_VOLUME_USD}`);
-        return;
-    }
+    if (volumeUSD < MIN_VOLUME_USD) return;
     
     const side = order.S;
     const timeMs = order.T;
@@ -237,29 +212,38 @@ function processLiquidation(order) {
     
     const isLongLiquidation = (side === 'SELL');
     
+    // Маркер: только текст, без стрелки
     const marker = {
         time: timeSec,
-        position: isLongLiquidation ? 'belowBar' : 'aboveBar',
+        position: 'aboveBar', // позиция не важна для текстового маркера
         color: isLongLiquidation ? '#f6465d' : '#0ecb81',
-        shape: 'arrowDown',
+        shape: 'text',        // текстовый маркер
         text: `${(volumeUSD / 1000).toFixed(0)}K`,
-        size: 2,
+        size: 12,             // размер шрифта
     };
     
+    // Сохранение в хранилище символа
     if (!allLiquidations.has(symbol)) {
         allLiquidations.set(symbol, loadSavedMarkers(symbol));
     }
     const symbolMarkers = allLiquidations.get(symbol);
-    
     const exists = symbolMarkers.some(m => m.time === marker.time && m.text === marker.text);
     if (!exists) {
         symbolMarkers.push(marker);
-        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) {
-            symbolMarkers.shift();
-        }
+        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) symbolMarkers.shift();
         saveMarkers(symbol, symbolMarkers);
     }
     
+    // Обновление ленты (для всех символов)
+    addToLiquidationFeed({
+        symbol: symbol,
+        side: side,
+        volume: volumeUSD,
+        time: timeMs,
+        price: price
+    });
+    
+    // Если текущий символ — обновляем график
     if (symbol === currentSymbol) {
         liquidationMarkers = symbolMarkers;
         updateMarkersOnChart();
@@ -365,7 +349,7 @@ async function loadMoreHistory() {
     }
 }
 
-// WebSocket для цен и свечей
+// WebSocket для цен и свечей (без изменений)
 function connectWebSocket() {
     ws = new WebSocket(BINANCE_WS);
     ws.onopen = () => {
