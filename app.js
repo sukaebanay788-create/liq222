@@ -1,4 +1,4 @@
-// Binance Futures Screener (с сохранением ликвидаций в localStorage)
+// Binance Futures Screener (сохранение ликвидаций, фильтр 5000, логирование)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -24,15 +24,12 @@ let isLoadingMore = false;
 
 // ---------- Ликвидации ----------
 let liquidationWs = null;
-let liquidationMarkers = [];                // маркеры для текущего символа
-const MAX_MARKERS_PER_SYMBOL = 500;         // ограничение на количество сохраняемых маркеров
-const MIN_VOLUME_USD = 25000;               // фильтр по объёму
+let liquidationMarkers = [];
+const MAX_MARKERS_PER_SYMBOL = 500;
+const MIN_VOLUME_USD = 5000;                // снижен до 5000
 let liquidationCount = 0;
 
-// Хранилище всех ликвидаций по символам (в памяти для быстрого доступа)
-const allLiquidations = new Map();          // symbol -> массив маркеров
-
-// Ключ для localStorage
+const allLiquidations = new Map();
 const STORAGE_PREFIX = 'binance_liq_';
 
 // Длительность таймфрейма в миллисекундах
@@ -202,9 +199,7 @@ function saveMarkers(symbol, markers) {
         localStorage.setItem(key, JSON.stringify(markers));
     } catch (e) {
         console.error('Ошибка сохранения маркеров в localStorage:', e);
-        // Если превышен лимит, можно очистить старые
         if (e.name === 'QuotaExceededError') {
-            // Удаляем старые записи для других символов (простая очистка)
             const keys = Object.keys(localStorage).filter(k => k.startsWith(STORAGE_PREFIX));
             keys.sort((a, b) => (localStorage.getItem(a)?.length || 0) - (localStorage.getItem(b)?.length || 0));
             for (let i = 0; i < Math.min(5, keys.length); i++) {
@@ -226,7 +221,13 @@ function processLiquidation(order) {
     const quantity = parseFloat(order.q);
     const volumeUSD = price * quantity;
     
-    if (volumeUSD < MIN_VOLUME_USD) return;
+    // Логирование
+    console.log(`[Liquidation] ${symbol} ${order.S} ${quantity.toFixed(3)} @ ${price} (vol: $${volumeUSD.toFixed(0)})`);
+    
+    if (volumeUSD < MIN_VOLUME_USD) {
+        console.log(`Filtered out: $${volumeUSD.toFixed(0)} < $${MIN_VOLUME_USD}`);
+        return;
+    }
     
     const side = order.S;
     const timeMs = order.T;
@@ -240,30 +241,25 @@ function processLiquidation(order) {
         time: timeSec,
         position: isLongLiquidation ? 'belowBar' : 'aboveBar',
         color: isLongLiquidation ? '#f6465d' : '#0ecb81',
-        shape: 'arrowDown', // можно 'circle'
+        shape: 'arrowDown',
         text: `${(volumeUSD / 1000).toFixed(0)}K`,
         size: 2,
     };
     
-    // Получаем текущий массив маркеров для символа из памяти или localStorage
     if (!allLiquidations.has(symbol)) {
         allLiquidations.set(symbol, loadSavedMarkers(symbol));
     }
     const symbolMarkers = allLiquidations.get(symbol);
     
-    // Проверяем, нет ли уже такого же маркера (по времени и тексту)
     const exists = symbolMarkers.some(m => m.time === marker.time && m.text === marker.text);
     if (!exists) {
         symbolMarkers.push(marker);
-        // Ограничиваем количество
         if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) {
             symbolMarkers.shift();
         }
-        // Сохраняем в localStorage
         saveMarkers(symbol, symbolMarkers);
     }
     
-    // Если это текущий символ, обновляем отображение
     if (symbol === currentSymbol) {
         liquidationMarkers = symbolMarkers;
         updateMarkersOnChart();
@@ -272,13 +268,11 @@ function processLiquidation(order) {
     }
 }
 
-// Обновление маркеров на графике
 function updateMarkersOnChart() {
     if (!candleSeries) return;
     candleSeries.setMarkers(liquidationMarkers);
 }
 
-// Обновление статуса соединения с счётчиком
 function updateStatusWithCount() {
     const el = document.getElementById('connStatus');
     if (el) {
@@ -320,7 +314,6 @@ async function loadChartData(symbol) {
         updateEmaLines(currentCandles);
         chart.timeScale().fitContent();
         
-        // Загружаем сохранённые маркеры для этого символа
         if (!allLiquidations.has(symbol)) {
             allLiquidations.set(symbol, loadSavedMarkers(symbol));
         }
@@ -362,7 +355,6 @@ async function loadMoreHistory() {
         currentCandles = [...newCandles, ...currentCandles];
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
-        // Маркеры остаются те же
         updateMarkersOnChart();
     } catch (e) {
         console.error('Ошибка подгрузки истории:', e);
