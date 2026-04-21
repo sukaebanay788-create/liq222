@@ -1,4 +1,4 @@
-// Binance Futures Screener (с лентой ликвидаций, маркеры только текст)
+// Binance Futures Screener (лента ликвидаций, фильтр 5000, только цифры на графике)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -26,18 +26,16 @@ let isLoadingMore = false;
 let liquidationWs = null;
 let liquidationMarkers = [];
 const MAX_MARKERS_PER_SYMBOL = 500;
-const MIN_VOLUME_USD = 5000; // изменено на 5000
+const MIN_VOLUME_USD = 5000;
 let liquidationCount = 0;
 
-// Хранилище маркеров по символам
 const allLiquidations = new Map();
 const STORAGE_PREFIX = 'binance_liq_';
 
-// Лента последних ликвидаций (для всех символов)
-const MAX_FEED_ITEMS = 20;
-let liquidationFeed = []; // массив объектов { symbol, side, volume, time, price }
+// Лента ликвидаций (последние 20 событий по всем символам)
+let recentLiquidations = [];
+const MAX_RECENT = 20;
 
-// Длительность таймфрейма в мс
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
     const value = parseInt(tf);
@@ -58,7 +56,69 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
-// ... (loadCoins без изменений) ...
+// Загрузка списка фьючерсов
+async function loadCoins() {
+    try {
+        const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
+        const exchangeData = await exchangeInfoRes.json();
+        
+        const usdtPairs = exchangeData.symbols.filter(s => 
+            s.quoteAsset === 'USDT' && 
+            s.status === 'TRADING' &&
+            s.contractType === 'PERPETUAL'
+        );
+
+        const tickersRes = await fetch(`${BINANCE_API}/fapi/v1/ticker/24hr`);
+        const tickers = await tickersRes.json();
+        const tickersMap = new Map(tickers.map(t => [t.symbol, t]));
+
+        const promises = usdtPairs.map(async (pair) => {
+            const symbol = pair.symbol;
+            const ticker = tickersMap.get(symbol);
+            if (!ticker) return null;
+
+            try {
+                const klines30m = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=30m&limit=2`).then(r => {
+                    if (!r.ok) throw new Error('No data');
+                    return r.json();
+                });
+                let change30m = 0;
+                if (klines30m.length >= 1) {
+                    const lastCandle = klines30m[klines30m.length - 1];
+                    const open = parseFloat(lastCandle[1]);
+                    const close = parseFloat(lastCandle[4]);
+                    change30m = ((close - open) / open) * 100;
+                }
+                return {
+                    symbol,
+                    price: parseFloat(ticker.lastPrice),
+                    change: parseFloat(ticker.priceChangePercent),
+                    change30m,
+                };
+            } catch (e) {
+                return {
+                    symbol,
+                    price: parseFloat(ticker.lastPrice),
+                    change: parseFloat(ticker.priceChangePercent),
+                    change30m: 0,
+                };
+            }
+        });
+
+        const results = await Promise.all(promises);
+        results.forEach(coinData => {
+            if (coinData) coins.set(coinData.symbol, coinData);
+        });
+
+        filteredCoins = Array.from(coins.values());
+        sortCoins();
+        renderCoinsList();
+        updateCoinsCount();
+    } catch (error) {
+        console.error('Ошибка загрузки монет:', error);
+        document.getElementById('coinsList').innerHTML = '<div class="loading">Ошибка загрузки</div>';
+    }
+}
 
 // График
 function initChart() {
@@ -120,7 +180,6 @@ function connectLiquidationWebSocket() {
     };
 }
 
-// Загрузка сохранённых маркеров
 function loadSavedMarkers(symbol) {
     const key = STORAGE_PREFIX + symbol;
     const saved = localStorage.getItem(key);
@@ -140,7 +199,7 @@ function saveMarkers(symbol, markers) {
     try {
         localStorage.setItem(key, JSON.stringify(markers));
     } catch (e) {
-        console.error('Ошибка сохранения маркеров:', e);
+        console.error('Ошибка сохранения маркеров в localStorage:', e);
         if (e.name === 'QuotaExceededError') {
             const keys = Object.keys(localStorage).filter(k => k.startsWith(STORAGE_PREFIX));
             keys.sort((a, b) => (localStorage.getItem(a)?.length || 0) - (localStorage.getItem(b)?.length || 0));
@@ -149,50 +208,35 @@ function saveMarkers(symbol, markers) {
             }
             try {
                 localStorage.setItem(key, JSON.stringify(markers));
-            } catch (e2) {}
+            } catch (e2) {
+                console.error('Повторная ошибка сохранения');
+            }
         }
     }
 }
 
 // Обновление ленты ликвидаций в UI
-function updateLiquidationFeedUI() {
-    const container = document.getElementById('liquidationFeedContent');
-    if (!container) return;
-    
-    if (liquidationFeed.length === 0) {
-        container.innerHTML = '<div class="liquidation-item">Нет данных</div>';
+function updateLiquidationFeed() {
+    const feedEl = document.getElementById('liquidationFeed');
+    if (!feedEl) return;
+    if (recentLiquidations.length === 0) {
+        feedEl.innerHTML = '<div style="color: #848e9c; text-align: center;">Ожидание ликвидаций...</div>';
         return;
     }
-    
-    // Показываем последние 20 в обратном порядке (новые сверху)
-    const items = [...liquidationFeed].reverse();
-    let html = '';
-    for (const item of items) {
-        const timeStr = new Date(item.time).toLocaleTimeString().slice(0,5);
-        const sideClass = item.side === 'SELL' ? 'long' : 'short';
-        const sideText = item.side === 'SELL' ? 'LONG' : 'SHORT';
-        const volumeText = item.volume >= 1000 ? (item.volume/1000).toFixed(1)+'K' : item.volume.toFixed(0);
-        html += `
-            <div class="liquidation-item">
-                <span><span class="liq-symbol">${item.symbol.replace('USDT','')}</span> <span class="liq-side ${sideClass}">${sideText}</span></span>
-                <span class="liq-volume">$${volumeText}</span>
-                <span class="liq-time">${timeStr}</span>
+    feedEl.innerHTML = recentLiquidations.map(liq => {
+        const sideClass = liq.side === 'SELL' ? 'liq-side-sell' : 'liq-side-buy';
+        const sideText = liq.side === 'SELL' ? 'LONG LIQ' : 'SHORT LIQ';
+        return `
+            <div class="liquidation-feed-item">
+                <span class="liq-symbol">${liq.symbol.replace('USDT', '')}</span>
+                <span class="${sideClass}">${sideText}</span>
+                <span class="liq-volume">${(liq.volume / 1000).toFixed(0)}K</span>
+                <span>${liq.price.toFixed(2)}</span>
             </div>
         `;
-    }
-    container.innerHTML = html;
+    }).join('');
 }
 
-// Добавление записи в ленту
-function addToLiquidationFeed(item) {
-    liquidationFeed.push(item);
-    if (liquidationFeed.length > MAX_FEED_ITEMS * 2) { // держим немного больше, чтобы при реверсе было что показать
-        liquidationFeed.shift();
-    }
-    updateLiquidationFeedUI();
-}
-
-// Обработка ликвидации
 function processLiquidation(order) {
     const symbol = order.s;
     const price = parseFloat(order.p);
@@ -210,40 +254,41 @@ function processLiquidation(order) {
     const candleOpenTimeMs = Math.floor(timeMs / timeframeMs) * timeframeMs;
     const timeSec = Math.floor(candleOpenTimeMs / 1000);
     
-    const isLongLiquidation = (side === 'SELL');
-    
-    // Маркер: только текст, без стрелки
     const marker = {
         time: timeSec,
-        position: 'aboveBar', // позиция не важна для текстового маркера
-        color: isLongLiquidation ? '#f6465d' : '#0ecb81',
-        shape: 'text',        // текстовый маркер
+        position: 'belowBar', // не важно, так как shape не рисуем
+        color: side === 'SELL' ? '#f6465d' : '#0ecb81',
+        shape: 'circle',      // не отображается, т.к. мы используем текст
         text: `${(volumeUSD / 1000).toFixed(0)}K`,
-        size: 12,             // размер шрифта
+        size: 2,
     };
     
-    // Сохранение в хранилище символа
+    // Обновляем recent-ленту
+    recentLiquidations.unshift({
+        symbol,
+        side,
+        volume: volumeUSD,
+        price,
+        time: timeMs
+    });
+    if (recentLiquidations.length > MAX_RECENT) recentLiquidations.pop();
+    updateLiquidationFeed();
+    
+    // Сохраняем в хранилище символа
     if (!allLiquidations.has(symbol)) {
         allLiquidations.set(symbol, loadSavedMarkers(symbol));
     }
     const symbolMarkers = allLiquidations.get(symbol);
+    
     const exists = symbolMarkers.some(m => m.time === marker.time && m.text === marker.text);
     if (!exists) {
         symbolMarkers.push(marker);
-        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) symbolMarkers.shift();
+        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) {
+            symbolMarkers.shift();
+        }
         saveMarkers(symbol, symbolMarkers);
     }
     
-    // Обновление ленты (для всех символов)
-    addToLiquidationFeed({
-        symbol: symbol,
-        side: side,
-        volume: volumeUSD,
-        time: timeMs,
-        price: price
-    });
-    
-    // Если текущий символ — обновляем график
     if (symbol === currentSymbol) {
         liquidationMarkers = symbolMarkers;
         updateMarkersOnChart();
@@ -254,7 +299,8 @@ function processLiquidation(order) {
 
 function updateMarkersOnChart() {
     if (!candleSeries) return;
-    candleSeries.setMarkers(liquidationMarkers);
+    // Отображаем только текст (маркер без стрелки)
+    candleSeries.setMarkers(liquidationMarkers.map(m => ({ ...m, shape: 'circle' })));
 }
 
 function updateStatusWithCount() {
@@ -264,7 +310,6 @@ function updateStatusWithCount() {
     }
 }
 
-// Расчёт EMA
 function calculateEMA(data, period) {
     if (data.length < period) return [];
     const ema = [];
@@ -280,7 +325,6 @@ function calculateEMA(data, period) {
     return ema;
 }
 
-// Загрузка свечей
 async function loadChartData(symbol) {
     try {
         const res = await fetch(
@@ -349,7 +393,6 @@ async function loadMoreHistory() {
     }
 }
 
-// WebSocket для цен и свечей (без изменений)
 function connectWebSocket() {
     ws = new WebSocket(BINANCE_WS);
     ws.onopen = () => {
@@ -446,7 +489,6 @@ function formatPrice(p) {
     return p.toFixed(6);
 }
 
-// Обновление 30м по клику
 async function refresh30mChanges() {
     const headerSpan = document.querySelector('#listHeader span[data-sort="change30m"]');
     const originalText = headerSpan.textContent;
