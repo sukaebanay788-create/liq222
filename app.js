@@ -1,4 +1,4 @@
-// Binance Futures Screener (с индикатором Bid/Ask Volume на 30% глубины)
+// Binance Futures Screener (исправлен addPane -> addSubchart)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -37,7 +37,6 @@ let recentLiquidations = [];
 const MAX_RECENT = 20;
 
 // ---------- Индикатор Bid/Ask Volume ----------
-let depthWs = null;
 let bidVolumeSeries = null;
 let askVolumeSeries = null;
 let volumePane = null;
@@ -157,12 +156,13 @@ function initChart() {
         crosshairMarkerVisible: false, autoscaleInfoProvider: () => null,
     });
 
-    // Создаём отдельную панель для объёмов Bid/Ask
-    volumePane = chart.addPane({ 
+    // Создаём отдельную панель для индикатора объёмов
+    volumePane = chart.addSubchart({
         height: 150,
-        priceScale: { visible: true }
+        priceScale: { visible: true },
     });
 
+    // Добавляем линии на новую панель
     bidVolumeSeries = chart.addLineSeries({
         color: '#0ecb81',
         lineWidth: 1,
@@ -484,7 +484,6 @@ function processDepthUpdate(data) {
     const bids = data.b; // [[price, volume], ...]
     const asks = data.a;
     
-    // Определяем среднюю цену как среднее между лучшим бидом и лучшим аском
     if (bids.length === 0 || asks.length === 0) return;
     
     const bestBid = parseFloat(bids[0][0]);
@@ -499,7 +498,7 @@ function processDepthUpdate(data) {
         if (p >= midPrice - threshold) {
             bidVolume += parseFloat(vol);
         } else {
-            break; // массив отсортирован по убыванию
+            break;
         }
     }
     
@@ -509,7 +508,7 @@ function processDepthUpdate(data) {
         if (p <= midPrice + threshold) {
             askVolume += parseFloat(vol);
         } else {
-            break; // массив отсортирован по возрастанию
+            break;
         }
     }
     
