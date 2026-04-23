@@ -1,4 +1,4 @@
-// Binance Futures Screener (только цифры на графике, фильтр 5000)
+// Binance Futures Screener (исправлено размещение маркеров ликвидаций)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -254,13 +254,15 @@ function processLiquidation(order) {
     const candleOpenTimeMs = Math.floor(timeMs / timeframeMs) * timeframeMs;
     const timeSec = Math.floor(candleOpenTimeMs / 1000);
     
+    const isLongLiquidation = (side === 'SELL');
+    
     const marker = {
         time: timeSec,
-        position: 'inBar',         // позиция не важна, мы скроем значок
+        position: isLongLiquidation ? 'belowBar' : 'aboveBar',
         color: side === 'SELL' ? '#f6465d' : '#0ecb81',
-        shape: 'circle',           // будет заменён на текст
+        shape: 'circle',
         text: `${(volumeUSD / 1000).toFixed(0)}K`,
-        size: 2,
+        size: 1,   // минимальный размер для корректного позиционирования текста
     };
     
     // Обновляем recent-ленту
@@ -299,13 +301,7 @@ function processLiquidation(order) {
 
 function updateMarkersOnChart() {
     if (!candleSeries) return;
-    // Принудительно скрываем значки: shape: 'circle' + size: 0
-    const markersForChart = liquidationMarkers.map(m => ({
-        ...m,
-        shape: 'circle',
-        size: 0,                // отключает отрисовку значка
-    }));
-    candleSeries.setMarkers(markersForChart);
+    candleSeries.setMarkers(liquidationMarkers);
 }
 
 function updateStatusWithCount() {
