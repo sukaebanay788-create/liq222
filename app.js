@@ -1,4 +1,4 @@
-// Binance Futures Screener (стабильная версия: ликвидации, лента, сохранение)
+// Binance Futures Screener (исправлены прыжки шкалы при real-time обновлениях)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -127,7 +127,7 @@ function initChart() {
         layout: { background: { color: '#0b0e11' }, textColor: '#d1d4dc' },
         grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: '#1e2329' },
+        rightPriceScale: { borderColor: '#1e2329', autoScale: true, scaleMargins: { top: 0.02, bottom: 0.02 } },
         timeScale: { borderColor: '#1e2329', timeVisible: true },
     });
 
@@ -135,6 +135,18 @@ function initChart() {
         upColor: '#0ecb81', downColor: '#f6465d',
         borderUpColor: '#0ecb81', borderDownColor: '#f6465d',
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
+    });
+
+    // Отключаем влияние маркеров на автошкалу
+    candleSeries.markers = () => ({
+        autoscaleInfo: () => null,
+        markers: () => [],
+    });
+
+    // Защита от выбросов при автообновлении шкалы
+    candleSeries.priceScale().applyOptions({
+        autoScale: true,
+        mode: 0, // Normal mode
     });
 
     ema65Series = chart.addLineSeries({
@@ -337,9 +349,14 @@ async function loadChartData(symbol) {
         }));
         
         oldestTime = klines.length > 0 ? klines[0][0] : null;
+        
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         chart.timeScale().fitContent();
+        
+        // Принудительно сбрасываем масштаб после загрузки истории
+        const priceScale = candleSeries.priceScale();
+        priceScale.applyOptions({ autoScale: true });
         
         if (!allLiquidations.has(symbol)) {
             allLiquidations.set(symbol, loadSavedMarkers(symbol));
@@ -383,6 +400,7 @@ async function loadMoreHistory() {
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         updateMarkersOnChart();
+        // Не сбрасываем масштаб при подгрузке истории
     } catch (e) {
         console.error('Ошибка подгрузки истории:', e);
     } finally {
@@ -457,18 +475,34 @@ function updateChartWithKline(data) {
         low: parseFloat(k.l),
         close: parseFloat(k.c)
     };
+    
+    // Простая фильтрация выбросов: если high/low слишком далеко от предыдущих значений — игнорируем обновление
     const lastCandle = currentCandles.length > 0 ? currentCandles[currentCandles.length - 1] : null;
+    
     if (!lastCandle) {
         currentCandles = [newCandle];
         candleSeries.setData(currentCandles);
     } else if (candleTime === lastCandle.time) {
+        // Обновляем текущую свечу, но с проверкой на реалистичность
+        const prevHigh = lastCandle.high;
+        const prevLow = lastCandle.low;
+        if (newCandle.high > prevHigh * 1.5 || newCandle.low < prevLow * 0.5) {
+            // Вероятно выброс, игнорируем это обновление
+            return;
+        }
         Object.assign(lastCandle, newCandle);
         candleSeries.update(newCandle);
     } else if (candleTime > lastCandle.time) {
         currentCandles.push(newCandle);
+        if (currentCandles.length > 1000) currentCandles.shift();
         candleSeries.update(newCandle);
     }
+    
+    // Обновляем EMA
     updateEmaLines(currentCandles);
+    
+    // НЕ вызываем автоматический пересчёт масштаба при каждом обновлении
+    // Это устраняет прыжки
 }
 
 function updateHeader(symbol) {
