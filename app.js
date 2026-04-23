@@ -1,4 +1,4 @@
-// Binance Futures Screener (исправлен addPane -> addSubchart)
+// Binance Futures Screener (стабильная версия: ликвидации, лента, сохранение)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -35,12 +35,6 @@ const STORAGE_PREFIX = 'binance_liq_';
 
 let recentLiquidations = [];
 const MAX_RECENT = 20;
-
-// ---------- Индикатор Bid/Ask Volume ----------
-let bidVolumeSeries = null;
-let askVolumeSeries = null;
-let volumePane = null;
-let depthSubscribedSymbol = null;
 
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
@@ -156,31 +150,6 @@ function initChart() {
         crosshairMarkerVisible: false, autoscaleInfoProvider: () => null,
     });
 
-    // Создаём отдельную панель для индикатора объёмов
-    volumePane = chart.addSubchart({
-        height: 150,
-        priceScale: { visible: true },
-    });
-
-    // Добавляем линии на новую панель
-    bidVolumeSeries = chart.addLineSeries({
-        color: '#0ecb81',
-        lineWidth: 1,
-        priceScaleId: volumePane.priceScale().id(),
-        pane: volumePane,
-        lastValueVisible: false,
-        priceLineVisible: false,
-    });
-
-    askVolumeSeries = chart.addLineSeries({
-        color: '#f6465d',
-        lineWidth: 1,
-        priceScaleId: volumePane.priceScale().id(),
-        pane: volumePane,
-        lastValueVisible: false,
-        priceLineVisible: false,
-    });
-
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
     });
@@ -209,31 +178,6 @@ function connectLiquidationWebSocket() {
     liquidationWs.onerror = (e) => {
         console.error('Liquidation WS error:', e);
     };
-}
-
-// Подписка на depth для индикатора Bid/Ask
-function subscribeDepthStream(symbol) {
-    if (!wsReady || ws.readyState !== WebSocket.OPEN) return;
-    if (depthSubscribedSymbol === symbol) return;
-    
-    // Отписываемся от предыдущего символа
-    if (depthSubscribedSymbol) {
-        ws.send(JSON.stringify({
-            method: 'UNSUBSCRIBE',
-            params: [`${depthSubscribedSymbol.toLowerCase()}@depth20@100ms`],
-            id: Date.now()
-        }));
-    }
-    
-    // Подписываемся на новый
-    ws.send(JSON.stringify({
-        method: 'SUBSCRIBE',
-        params: [`${symbol.toLowerCase()}@depth20@100ms`],
-        id: Date.now() + 1
-    }));
-    
-    depthSubscribedSymbol = symbol;
-    console.log(`Subscribed to depth stream for ${symbol}`);
 }
 
 function loadSavedMarkers(symbol) {
@@ -405,10 +349,7 @@ async function loadChartData(symbol) {
         liquidationCount = liquidationMarkers.length;
         updateStatusWithCount();
         
-        if (wsReady) {
-            subscribeToKlineStream(symbol);
-            subscribeDepthStream(symbol);
-        }
+        if (wsReady) subscribeToKlineStream(symbol);
         updateHeader(symbol);
     } catch (e) {
         console.error('Ошибка загрузки графика:', e);
@@ -457,69 +398,22 @@ function connectWebSocket() {
         wsReady = true;
         updateConnectionStatus(true);
         updateSubscriptions();
-        if (currentSymbol) {
-            subscribeToKlineStream(currentSymbol);
-            subscribeDepthStream(currentSymbol);
-        }
+        if (currentSymbol) subscribeToKlineStream(currentSymbol);
     };
     ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         if (msg.id) return;
         if (msg.e === '24hrTicker') updateTicker(msg);
         else if (msg.e === 'kline') updateChartWithKline(msg);
-        else if (msg.e === 'depthUpdate') processDepthUpdate(msg);
     };
     ws.onclose = () => {
         wsReady = false;
         updateConnectionStatus(false);
         lastSubscriptionSet.clear();
         currentKlineSymbol = null;
-        depthSubscribedSymbol = null;
         setTimeout(connectWebSocket, 5000);
     };
     ws.onerror = (e) => console.error('WS error:', e);
-}
-
-function processDepthUpdate(data) {
-    const bids = data.b; // [[price, volume], ...]
-    const asks = data.a;
-    
-    if (bids.length === 0 || asks.length === 0) return;
-    
-    const bestBid = parseFloat(bids[0][0]);
-    const bestAsk = parseFloat(asks[0][0]);
-    const midPrice = (bestBid + bestAsk) / 2;
-    
-    const threshold = midPrice * 0.3;
-    
-    let bidVolume = 0;
-    for (const [price, vol] of bids) {
-        const p = parseFloat(price);
-        if (p >= midPrice - threshold) {
-            bidVolume += parseFloat(vol);
-        } else {
-            break;
-        }
-    }
-    
-    let askVolume = 0;
-    for (const [price, vol] of asks) {
-        const p = parseFloat(price);
-        if (p <= midPrice + threshold) {
-            askVolume += parseFloat(vol);
-        } else {
-            break;
-        }
-    }
-    
-    const time = Math.floor(Date.now() / 1000);
-    
-    if (bidVolumeSeries) {
-        bidVolumeSeries.update({ time, value: bidVolume });
-    }
-    if (askVolumeSeries) {
-        askVolumeSeries.update({ time, value: askVolume });
-    }
 }
 
 function updateSubscriptions() {
