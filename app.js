@@ -1,4 +1,4 @@
-// Binance Futures Screener (исправлено размещение маркеров ликвидаций)
+// Binance Futures Screener (динамический фильтр ликвидаций)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -26,7 +26,6 @@ let isLoadingMore = false;
 let liquidationWs = null;
 let liquidationMarkers = [];
 const MAX_MARKERS_PER_SYMBOL = 500;
-const MIN_VOLUME_USD = 5000;
 let liquidationCount = 0;
 
 const allLiquidations = new Map();
@@ -246,7 +245,9 @@ function processLiquidation(order) {
     // Логирование в консоль
     console.log(`[Liquidation] ${symbol} ${order.S} ${quantity.toFixed(4)} @ ${price.toFixed(2)} (vol: ${volumeUSD.toFixed(0)} USD)`);
     
-    if (volumeUSD < MIN_VOLUME_USD) return;
+    // Динамический фильтр: BTCUSDT → 100000, остальные → 10000
+    const minVolume = (symbol === 'BTCUSDT') ? 100000 : 10000;
+    if (volumeUSD < minVolume) return;
     
     const side = order.S;
     const timeMs = order.T;
@@ -262,7 +263,7 @@ function processLiquidation(order) {
         color: side === 'SELL' ? '#f6465d' : '#0ecb81',
         shape: 'circle',
         text: `${(volumeUSD / 1000).toFixed(0)}K`,
-        size: 1,   // минимальный размер для корректного позиционирования текста
+        size: 1,
     };
     
     // Обновляем recent-ленту
