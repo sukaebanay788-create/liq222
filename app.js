@@ -1,5 +1,5 @@
-// Binance Futures Screener (исправлены WebSocket URL под новую архитектуру Binance)
-const BINANCE_WS_BASE = 'wss://fstream.binance.com/public/ws';   // для потоков с высокой частотой (включая ликвидации)
+// Binance Futures Screener (финальная версия с новыми эндпоинтами WebSocket)
+const BINANCE_WS_PUBLIC = 'wss://fstream.binance.com/public/ws';   // для высокочастотных данных (!forceOrder@arr)
 const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/stream'; // для публичных потоков (kline, ticker)
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -37,9 +37,8 @@ const STORAGE_PREFIX = 'binance_liq_';
 let recentLiquidations = [];
 const MAX_RECENT = 20;
 
-// Heartbeat-механизм для контроля зависания потока ликвидаций
 let liquidationHeartbeat = null;
-const LIQUIDATION_TIMEOUT = 80 * 1000; // 80 секунд, чтобы не дать Cloudflare разорвать соединение
+const LIQUIDATION_TIMEOUT = 80 * 1000; // 80 секунд
 
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
@@ -61,7 +60,6 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
-// Загрузка списка фьючерсов
 async function loadCoins() {
     try {
         const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
@@ -125,7 +123,6 @@ async function loadCoins() {
     }
 }
 
-// График
 function initChart() {
     const container = document.getElementById('chart');
     chart = LightweightCharts.createChart(container, {
@@ -142,7 +139,6 @@ function initChart() {
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
     });
 
-    // Отключаем влияние маркеров на автошкалу
     candleSeries.markers = () => ({
         autoscaleInfo: () => null,
         markers: () => [],
@@ -166,22 +162,18 @@ function initChart() {
     });
 }
 
-// Подключение к WebSocket ликвидаций с улучшенным heartbeat
 function connectLiquidationWebSocket() {
-    // Очищаем предыдущий таймер, если был
     if (liquidationHeartbeat) {
         clearTimeout(liquidationHeartbeat);
         liquidationHeartbeat = null;
     }
-    // Закрываем старое соединение, если оно ещё открыто
     if (liquidationWs && (liquidationWs.readyState === WebSocket.OPEN || liquidationWs.readyState === WebSocket.CONNECTING)) {
         liquidationWs.onclose = null;
         liquidationWs.close();
     }
 
     try {
-        // Используем новый public-эндпоинт для потока ликвидаций
-        liquidationWs = new WebSocket(`${BINANCE_WS_BASE}/!forceOrder@arr`);
+        liquidationWs = new WebSocket(`${BINANCE_WS_PUBLIC}/!forceOrder@arr`);
 
         function resetHeartbeat() {
             if (liquidationHeartbeat) clearTimeout(liquidationHeartbeat);
@@ -232,12 +224,7 @@ function loadSavedMarkers(symbol) {
     const key = STORAGE_PREFIX + symbol;
     const saved = localStorage.getItem(key);
     if (saved) {
-        try {
-            return JSON.parse(saved);
-        } catch (e) {
-            console.error('Ошибка парсинга сохранённых маркеров:', e);
-            return [];
-        }
+        try { return JSON.parse(saved); } catch (e) { return []; }
     }
     return [];
 }
@@ -256,14 +243,11 @@ function saveMarkers(symbol, markers) {
             }
             try {
                 localStorage.setItem(key, JSON.stringify(markers));
-            } catch (e2) {
-                console.error('Повторная ошибка сохранения');
-            }
+            } catch (e2) { console.error('Повторная ошибка сохранения'); }
         }
     }
 }
 
-// Обновление ленты ликвидаций в UI
 function updateLiquidationFeed() {
     const feedEl = document.getElementById('liquidationFeed');
     if (!feedEl) return;
@@ -313,13 +297,7 @@ function processLiquidation(order) {
         size: 1,
     };
     
-    recentLiquidations.unshift({
-        symbol,
-        side,
-        volume: volumeUSD,
-        price,
-        time: timeMs
-    });
+    recentLiquidations.unshift({ symbol, side, volume: volumeUSD, price, time: timeMs });
     if (recentLiquidations.length > MAX_RECENT) recentLiquidations.pop();
     updateLiquidationFeed();
     
@@ -331,9 +309,7 @@ function processLiquidation(order) {
     const exists = symbolMarkers.some(m => m.time === marker.time && m.text === marker.text);
     if (!exists) {
         symbolMarkers.push(marker);
-        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) {
-            symbolMarkers.shift();
-        }
+        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) symbolMarkers.shift();
         saveMarkers(symbol, symbolMarkers);
     }
     
@@ -374,9 +350,7 @@ function calculateEMA(data, period) {
 
 async function loadChartData(symbol) {
     try {
-        const res = await fetch(
-            `${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`
-        );
+        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`);
         const klines = await res.json();
         
         currentCandles = klines.map(k => ({
@@ -390,7 +364,6 @@ async function loadChartData(symbol) {
         updateEmaLines(currentCandles);
         chart.timeScale().fitContent();
         
-        // Принудительно сбрасываем масштаб после загрузки истории
         const priceScale = candleSeries.priceScale();
         priceScale.applyOptions({ autoScale: true });
         
@@ -446,7 +419,6 @@ async function loadMoreHistory() {
 }
 
 function connectWebSocket() {
-    // Основное соединение: используем market-эндпоинт, подписки динамически через send
     ws = new WebSocket(BINANCE_WS_MARKET);
     ws.onopen = () => {
         wsReady = true;
@@ -520,9 +492,7 @@ function updateChartWithKline(data) {
     } else if (candleTime === lastCandle.time) {
         const prevHigh = lastCandle.high;
         const prevLow = lastCandle.low;
-        if (newCandle.high > prevHigh * 1.5 || newCandle.low < prevLow * 0.5) {
-            return;
-        }
+        if (newCandle.high > prevHigh * 1.5 || newCandle.low < prevLow * 0.5) return;
         Object.assign(lastCandle, newCandle);
         candleSeries.update(newCandle);
     } else if (candleTime > lastCandle.time) {
@@ -636,7 +606,6 @@ function updateCoinRow(coin) {
 
 function selectCoin(symbol) {
     currentSymbol = symbol;
-    
     document.querySelectorAll('.coin-item').forEach(el => {
         el.classList.toggle('active', el.dataset.symbol === symbol);
     });
