@@ -1,4 +1,4 @@
-// Binance Futures Screener (исправлены прыжки шкалы при real-time обновлениях)
+// Binance Futures Screener (исправлена остановка потока ликвидаций + стабильный масштаб)
 const BINANCE_WS = 'wss://fstream.binance.com/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
@@ -35,6 +35,10 @@ const STORAGE_PREFIX = 'binance_liq_';
 
 let recentLiquidations = [];
 const MAX_RECENT = 20;
+
+// Heartbeat-механизм для контроля зависания потока ликвидаций
+let liquidationHeartbeat = null;
+const LIQUIDATION_TIMEOUT = 5 * 60 * 1000; // 5 минут без данных -> переподключение
 
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
@@ -127,7 +131,7 @@ function initChart() {
         layout: { background: { color: '#0b0e11' }, textColor: '#d1d4dc' },
         grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: '#1e2329', autoScale: true, scaleMargins: { top: 0.02, bottom: 0.02 } },
+        rightPriceScale: { borderColor: '#1e2329', scaleMargins: { top: 0.02, bottom: 0.02 } },
         timeScale: { borderColor: '#1e2329', timeVisible: true },
     });
 
@@ -137,16 +141,10 @@ function initChart() {
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
     });
 
-    // Отключаем влияние маркеров на автошкалу
+    // Отключаем влияние маркеров на автошкалу (не обязательно, но оставим)
     candleSeries.markers = () => ({
         autoscaleInfo: () => null,
         markers: () => [],
-    });
-
-    // Защита от выбросов при автообновлении шкалы
-    candleSeries.priceScale().applyOptions({
-        autoScale: true,
-        mode: 0, // Normal mode
     });
 
     ema65Series = chart.addLineSeries({
@@ -167,28 +165,56 @@ function initChart() {
     });
 }
 
-// Подключение к WebSocket ликвидаций
+// Подключение к WebSocket ликвидаций с heartbeat-контролем
 function connectLiquidationWebSocket() {
+    // Очищаем предыдущий таймер, если был
+    if (liquidationHeartbeat) {
+        clearTimeout(liquidationHeartbeat);
+        liquidationHeartbeat = null;
+    }
+
+    // Закрываем старое соединение, если оно ещё открыто
+    if (liquidationWs && (liquidationWs.readyState === WebSocket.OPEN || liquidationWs.readyState === WebSocket.CONNECTING)) {
+        liquidationWs.onclose = null; // убираем старый обработчик, чтобы избежать повторного reconnect
+        liquidationWs.close();
+    }
+
     liquidationWs = new WebSocket(`${BINANCE_WS}/!forceOrder@arr`);
-    
+
+    // Функция сброса heartbeat-таймера
+    function resetHeartbeat() {
+        if (liquidationHeartbeat) clearTimeout(liquidationHeartbeat);
+        liquidationHeartbeat = setTimeout(() => {
+            console.warn('Liquidation heartbeat timeout: no data received for 5 minutes. Reconnecting...');
+            connectLiquidationWebSocket();
+        }, LIQUIDATION_TIMEOUT);
+    }
+
     liquidationWs.onopen = () => {
         console.log('Liquidation WebSocket connected');
+        resetHeartbeat(); // запускаем таймер после подключения
     };
-    
+
     liquidationWs.onmessage = (event) => {
+        resetHeartbeat(); // сбрасываем таймер при каждом сообщении
         const msg = JSON.parse(event.data);
         if (msg.e === 'forceOrder') {
             processLiquidation(msg.o);
         }
     };
-    
-    liquidationWs.onclose = () => {
-        console.log('Liquidation WebSocket closed, reconnecting...');
+
+    liquidationWs.onclose = (event) => {
+        console.log(`Liquidation WebSocket closed (code: ${event.code}), reconnecting in 5s...`);
+        if (liquidationHeartbeat) {
+            clearTimeout(liquidationHeartbeat);
+            liquidationHeartbeat = null;
+        }
         setTimeout(connectLiquidationWebSocket, 5000);
     };
-    
+
     liquidationWs.onerror = (e) => {
         console.error('Liquidation WS error:', e);
+        // Закрытие вызовет onclose и переподключение
     };
 }
 
@@ -400,7 +426,6 @@ async function loadMoreHistory() {
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         updateMarkersOnChart();
-        // Не сбрасываем масштаб при подгрузке истории
     } catch (e) {
         console.error('Ошибка подгрузки истории:', e);
     } finally {
@@ -476,19 +501,17 @@ function updateChartWithKline(data) {
         close: parseFloat(k.c)
     };
     
-    // Простая фильтрация выбросов: если high/low слишком далеко от предыдущих значений — игнорируем обновление
     const lastCandle = currentCandles.length > 0 ? currentCandles[currentCandles.length - 1] : null;
     
     if (!lastCandle) {
         currentCandles = [newCandle];
         candleSeries.setData(currentCandles);
     } else if (candleTime === lastCandle.time) {
-        // Обновляем текущую свечу, но с проверкой на реалистичность
+        // Фильтрация выбросов
         const prevHigh = lastCandle.high;
         const prevLow = lastCandle.low;
         if (newCandle.high > prevHigh * 1.5 || newCandle.low < prevLow * 0.5) {
-            // Вероятно выброс, игнорируем это обновление
-            return;
+            return; // игнорируем выброс
         }
         Object.assign(lastCandle, newCandle);
         candleSeries.update(newCandle);
@@ -498,11 +521,7 @@ function updateChartWithKline(data) {
         candleSeries.update(newCandle);
     }
     
-    // Обновляем EMA
     updateEmaLines(currentCandles);
-    
-    // НЕ вызываем автоматический пересчёт масштаба при каждом обновлении
-    // Это устраняет прыжки
 }
 
 function updateHeader(symbol) {
