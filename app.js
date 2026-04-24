@@ -1,6 +1,9 @@
-// Binance Futures Screener – полностью рабочий с новыми WebSocket‑эндпоинтами
-const BINANCE_WS_PUBLIC = 'wss://fstream.binance.com/public/ws';   // высокочастотные данные
-const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/stream'; // публичные данные
+// Скринер фьючерсов Binance (исправленные WebSocket URL)
+// Важно! Новые базовые URL согласно обновлению Binance от 23 апреля 2026 г.
+
+// --- 1. Константы ---
+const BINANCE_WS_PUBLIC = 'wss://fstream.binance.com/public/ws';   // Для ликвидаций
+const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/ws';   // Для свечей
 const BINANCE_API = 'https://fapi.binance.com';
 
 let coins = new Map();
@@ -37,9 +40,6 @@ const STORAGE_PREFIX = 'binance_liq_';
 let recentLiquidations = [];
 const MAX_RECENT = 20;
 
-let liquidationHeartbeat = null;
-const LIQUIDATION_TIMEOUT = 80 * 1000; // 80 секунд
-
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
     const value = parseInt(tf);
@@ -60,6 +60,7 @@ async function init() {
     loadChartData(currentSymbol);
 }
 
+// Загрузка списка фьючерсов
 async function loadCoins() {
     try {
         const exchangeInfoRes = await fetch(`${BINANCE_API}/fapi/v1/exchangeInfo`);
@@ -123,13 +124,14 @@ async function loadCoins() {
     }
 }
 
+// График
 function initChart() {
     const container = document.getElementById('chart');
     chart = LightweightCharts.createChart(container, {
         layout: { background: { color: '#0b0e11' }, textColor: '#d1d4dc' },
         grid: { vertLines: { color: '#1e2329' }, horzLines: { color: '#1e2329' } },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: '#1e2329', scaleMargins: { top: 0.02, bottom: 0.02 } },
+        rightPriceScale: { borderColor: '#1e2329', autoScale: true, scaleMargins: { top: 0.02, bottom: 0.02 } },
         timeScale: { borderColor: '#1e2329', timeVisible: true },
     });
 
@@ -139,9 +141,16 @@ function initChart() {
         wickUpColor: '#0ecb81', wickDownColor: '#f6465d',
     });
 
+    // Отключаем влияние маркеров на автошкалу
     candleSeries.markers = () => ({
         autoscaleInfo: () => null,
         markers: () => [],
+    });
+
+    // Защита от выбросов при автообновлении шкалы
+    candleSeries.priceScale().applyOptions({
+        autoScale: true,
+        mode: 0, // Normal mode
     });
 
     ema65Series = chart.addLineSeries({
@@ -162,72 +171,41 @@ function initChart() {
     });
 }
 
-// ---------- Ликвидации – новое подключение с SUBSCRIBE ----------
+// Подключение к WebSocket ликвидаций (ссылка обновлена!)
 function connectLiquidationWebSocket() {
-    if (liquidationHeartbeat) {
-        clearTimeout(liquidationHeartbeat);
-        liquidationHeartbeat = null;
-    }
-    if (liquidationWs && (liquidationWs.readyState === WebSocket.OPEN || liquidationWs.readyState === WebSocket.CONNECTING)) {
-        liquidationWs.onclose = null;
-        liquidationWs.close();
-    }
-
-    try {
-        // Подключаемся к public/ws и сразу отправляем SUBSCRIBE
-        liquidationWs = new WebSocket(BINANCE_WS_PUBLIC);
-
-        function resetHeartbeat() {
-            if (liquidationHeartbeat) clearTimeout(liquidationHeartbeat);
-            liquidationHeartbeat = setTimeout(() => {
-                console.warn('No data for 80s, sending LIST_SUBSCRIPTIONS');
-                if (liquidationWs && liquidationWs.readyState === WebSocket.OPEN) {
-                    liquidationWs.send(JSON.stringify({ method: 'LIST_SUBSCRIPTIONS', id: Date.now() }));
-                    resetHeartbeat();
-                } else {
-                    console.warn('WebSocket not open, reconnecting...');
-                    connectLiquidationWebSocket();
-                }
-            }, LIQUIDATION_TIMEOUT);
+    liquidationWs = new WebSocket(`${BINANCE_WS_PUBLIC}/!forceOrder@arr`);
+    
+    liquidationWs.onopen = () => {
+        console.log('Liquidation WebSocket connected');
+    };
+    
+    liquidationWs.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.e === 'forceOrder') {
+            processLiquidation(msg.o);
         }
-
-        liquidationWs.onopen = () => {
-            console.log('Liquidation WebSocket connected. Subscribing to !forceOrder@arr');
-            // Отправляем подписку
-            liquidationWs.send(JSON.stringify({
-                method: 'SUBSCRIBE',
-                params: ['!forceOrder@arr'],
-                id: Date.now()
-            }));
-            resetHeartbeat();
-        };
-
-        liquidationWs.onmessage = (event) => {
-            resetHeartbeat();
-            const msg = JSON.parse(event.data);
-            if (msg.e === 'forceOrder') {
-                processLiquidation(msg.o);
-            }
-        };
-
-        liquidationWs.onclose = (event) => {
-            console.log(`Liquidation WS closed (${event.code}), reconnecting in 5s`);
-            if (liquidationHeartbeat) { clearTimeout(liquidationHeartbeat); liquidationHeartbeat = null; }
-            setTimeout(connectLiquidationWebSocket, 5000);
-        };
-
-        liquidationWs.onerror = (e) => console.error('Liquidation WS error:', e);
-    } catch (error) {
-        console.error('Failed to create liquidation WebSocket:', error);
+    };
+    
+    liquidationWs.onclose = () => {
+        console.log('Liquidation WebSocket closed, reconnecting...');
         setTimeout(connectLiquidationWebSocket, 5000);
-    }
+    };
+    
+    liquidationWs.onerror = (e) => {
+        console.error('Liquidation WS error:', e);
+    };
 }
 
 function loadSavedMarkers(symbol) {
     const key = STORAGE_PREFIX + symbol;
     const saved = localStorage.getItem(key);
     if (saved) {
-        try { return JSON.parse(saved); } catch (e) { return []; }
+        try {
+            return JSON.parse(saved);
+        } catch (e) {
+            console.error('Ошибка парсинга сохранённых маркеров:', e);
+            return [];
+        }
     }
     return [];
 }
@@ -237,32 +215,41 @@ function saveMarkers(symbol, markers) {
     try {
         localStorage.setItem(key, JSON.stringify(markers));
     } catch (e) {
-        console.error('Ошибка сохранения маркеров:', e);
+        console.error('Ошибка сохранения маркеров в localStorage:', e);
         if (e.name === 'QuotaExceededError') {
             const keys = Object.keys(localStorage).filter(k => k.startsWith(STORAGE_PREFIX));
             keys.sort((a, b) => (localStorage.getItem(a)?.length || 0) - (localStorage.getItem(b)?.length || 0));
-            for (let i = 0; i < Math.min(5, keys.length); i++) localStorage.removeItem(keys[i]);
-            try { localStorage.setItem(key, JSON.stringify(markers)); } catch (e2) {}
+            for (let i = 0; i < Math.min(5, keys.length); i++) {
+                localStorage.removeItem(keys[i]);
+            }
+            try {
+                localStorage.setItem(key, JSON.stringify(markers));
+            } catch (e2) {
+                console.error('Повторная ошибка сохранения');
+            }
         }
     }
 }
 
+// Обновление ленты ликвидаций в UI
 function updateLiquidationFeed() {
     const feedEl = document.getElementById('liquidationFeed');
     if (!feedEl) return;
     if (recentLiquidations.length === 0) {
-        feedEl.innerHTML = '<div style="color:#848e9c;text-align:center;">Ожидание ликвидаций...</div>';
+        feedEl.innerHTML = '<div style="color: #848e9c; text-align: center;">Ожидание ликвидаций...</div>';
         return;
     }
     feedEl.innerHTML = recentLiquidations.map(liq => {
         const sideClass = liq.side === 'SELL' ? 'liq-side-sell' : 'liq-side-buy';
         const sideText = liq.side === 'SELL' ? 'LONG LIQ' : 'SHORT LIQ';
-        return `<div class="liquidation-feed-item">
-            <span class="liq-symbol">${liq.symbol.replace('USDT','')}</span>
-            <span class="${sideClass}">${sideText}</span>
-            <span class="liq-volume">${(liq.volume/1000).toFixed(0)}K</span>
-            <span>${liq.price.toFixed(2)}</span>
-        </div>`;
+        return `
+            <div class="liquidation-feed-item">
+                <span class="liq-symbol">${liq.symbol.replace('USDT', '')}</span>
+                <span class="${sideClass}">${sideText}</span>
+                <span class="liq-volume">${(liq.volume / 1000).toFixed(0)}K</span>
+                <span>${liq.price.toFixed(2)}</span>
+            </div>
+        `;
     }).join('');
 }
 
@@ -294,16 +281,27 @@ function processLiquidation(order) {
         size: 1,
     };
     
-    recentLiquidations.unshift({ symbol, side, volume: volumeUSD, price, time: timeMs });
+    recentLiquidations.unshift({
+        symbol,
+        side,
+        volume: volumeUSD,
+        price,
+        time: timeMs
+    });
     if (recentLiquidations.length > MAX_RECENT) recentLiquidations.pop();
     updateLiquidationFeed();
     
-    if (!allLiquidations.has(symbol)) allLiquidations.set(symbol, loadSavedMarkers(symbol));
+    if (!allLiquidations.has(symbol)) {
+        allLiquidations.set(symbol, loadSavedMarkers(symbol));
+    }
     const symbolMarkers = allLiquidations.get(symbol);
     
-    if (!symbolMarkers.some(m => m.time === marker.time && m.text === marker.text)) {
+    const exists = symbolMarkers.some(m => m.time === marker.time && m.text === marker.text);
+    if (!exists) {
         symbolMarkers.push(marker);
-        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) symbolMarkers.shift();
+        if (symbolMarkers.length > MAX_MARKERS_PER_SYMBOL) {
+            symbolMarkers.shift();
+        }
         saveMarkers(symbol, symbolMarkers);
     }
     
@@ -315,11 +313,16 @@ function processLiquidation(order) {
     }
 }
 
-function updateMarkersOnChart() { if (candleSeries) candleSeries.setMarkers(liquidationMarkers); }
+function updateMarkersOnChart() {
+    if (!candleSeries) return;
+    candleSeries.setMarkers(liquidationMarkers);
+}
 
 function updateStatusWithCount() {
     const el = document.getElementById('connStatus');
-    if (el) el.textContent = `Connected (${liquidationCount} liq)`;
+    if (el) {
+        el.textContent = `Connected (${liquidationCount} liq)`;
+    }
 }
 
 function calculateEMA(data, period) {
@@ -339,7 +342,9 @@ function calculateEMA(data, period) {
 
 async function loadChartData(symbol) {
     try {
-        const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`);
+        const res = await fetch(
+            `${BINANCE_API}/fapi/v1/klines?symbol=${symbol}&interval=${currentTimeframe}&limit=1400`
+        );
         const klines = await res.json();
         
         currentCandles = klines.map(k => ({
@@ -348,12 +353,18 @@ async function loadChartData(symbol) {
         }));
         
         oldestTime = klines.length > 0 ? klines[0][0] : null;
+        
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         chart.timeScale().fitContent();
-        candleSeries.priceScale().applyOptions({ autoScale: true });
         
-        if (!allLiquidations.has(symbol)) allLiquidations.set(symbol, loadSavedMarkers(symbol));
+        // Принудительно сбрасываем масштаб после загрузки истории
+        const priceScale = candleSeries.priceScale();
+        priceScale.applyOptions({ autoScale: true });
+        
+        if (!allLiquidations.has(symbol)) {
+            allLiquidations.set(symbol, loadSavedMarkers(symbol));
+        }
         liquidationMarkers = allLiquidations.get(symbol) || [];
         updateMarkersOnChart();
         liquidationCount = liquidationMarkers.length;
@@ -361,11 +372,13 @@ async function loadChartData(symbol) {
         
         if (wsReady) subscribeToKlineStream(symbol);
         updateHeader(symbol);
-    } catch (e) { console.error('Ошибка загрузки графика:', e); }
+    } catch (e) {
+        console.error('Ошибка загрузки графика:', e);
+    }
 }
 
 function updateEmaLines(candles) {
-    if (!candles.length) return;
+    if (candles.length === 0) return;
     ema65Series.setData(calculateEMA(candles, 65));
     ema125Series.setData(calculateEMA(candles, 125));
     ema450Series.setData(calculateEMA(candles, 450));
@@ -374,12 +387,14 @@ function updateEmaLines(candles) {
 async function loadMoreHistory() {
     if (isLoadingMore || !oldestTime) return;
     isLoadingMore = true;
-    const btn = document.getElementById('loadMoreBtn'); btn.textContent = '⏳'; btn.disabled = true;
+    const btn = document.getElementById('loadMoreBtn');
+    btn.textContent = '⏳';
+    btn.disabled = true;
     try {
         const endTime = oldestTime - 1;
         const res = await fetch(`${BINANCE_API}/fapi/v1/klines?symbol=${currentSymbol}&interval=${currentTimeframe}&limit=1000&endTime=${endTime}`);
         const klines = await res.json();
-        if (!klines.length) return;
+        if (klines.length === 0) return;
         const newCandles = klines.map(k => ({
             time: k[0] / 1000,
             open: parseFloat(k[1]), high: parseFloat(k[2]), low: parseFloat(k[3]), close: parseFloat(k[4]),
@@ -389,11 +404,18 @@ async function loadMoreHistory() {
         candleSeries.setData(currentCandles);
         updateEmaLines(currentCandles);
         updateMarkersOnChart();
-    } catch (e) { console.error('Ошибка подгрузки истории:', e); }
-    finally { btn.textContent = '📜'; btn.disabled = false; isLoadingMore = false; }
+        // Не сбрасываем масштаб при подгрузке истории
+    } catch (e) {
+        console.error('Ошибка подгрузки истории:', e);
+    } finally {
+        btn.textContent = '📜';
+        btn.disabled = false;
+        isLoadingMore = false;
+    }
 }
 
 function connectWebSocket() {
+    // Подключаемся к новому market URL
     ws = new WebSocket(BINANCE_WS_MARKET);
     ws.onopen = () => {
         wsReady = true;
@@ -408,7 +430,10 @@ function connectWebSocket() {
         else if (msg.e === 'kline') updateChartWithKline(msg);
     };
     ws.onclose = () => {
-        wsReady = false; updateConnectionStatus(false); lastSubscriptionSet.clear(); currentKlineSymbol = null;
+        wsReady = false;
+        updateConnectionStatus(false);
+        lastSubscriptionSet.clear();
+        currentKlineSymbol = null;
         setTimeout(connectWebSocket, 5000);
     };
     ws.onerror = (e) => console.error('WS error:', e);
@@ -450,13 +475,26 @@ function updateChartWithKline(data) {
     const candleTime = k.t / 1000;
     const newCandle = {
         time: candleTime,
-        open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c)
+        open: parseFloat(k.o),
+        high: parseFloat(k.h),
+        low: parseFloat(k.l),
+        close: parseFloat(k.c)
     };
-    const lastCandle = currentCandles.length ? currentCandles[currentCandles.length-1] : null;
-    if (!lastCandle) { currentCandles = [newCandle]; candleSeries.setData(currentCandles); }
-    else if (candleTime === lastCandle.time) {
-        const prevHigh = lastCandle.high, prevLow = lastCandle.low;
-        if (newCandle.high > prevHigh*1.5 || newCandle.low < prevLow*0.5) return;
+    
+    // Простая фильтрация выбросов: если high/low слишком далеко от предыдущих значений — игнорируем обновление
+    const lastCandle = currentCandles.length > 0 ? currentCandles[currentCandles.length - 1] : null;
+    
+    if (!lastCandle) {
+        currentCandles = [newCandle];
+        candleSeries.setData(currentCandles);
+    } else if (candleTime === lastCandle.time) {
+        // Обновляем текущую свечу, но с проверкой на реалистичность
+        const prevHigh = lastCandle.high;
+        const prevLow = lastCandle.low;
+        if (newCandle.high > prevHigh * 1.5 || newCandle.low < prevLow * 0.5) {
+            // Вероятно выброс, игнорируем это обновление
+            return;
+        }
         Object.assign(lastCandle, newCandle);
         candleSeries.update(newCandle);
     } else if (candleTime > lastCandle.time) {
@@ -464,7 +502,12 @@ function updateChartWithKline(data) {
         if (currentCandles.length > 1000) currentCandles.shift();
         candleSeries.update(newCandle);
     }
+    
+    // Обновляем EMA
     updateEmaLines(currentCandles);
+    
+    // НЕ вызываем автоматический пересчёт масштаба при каждом обновлении
+    // Это устраняет прыжки
 }
 
 function updateHeader(symbol) {
@@ -507,19 +550,24 @@ async function refresh30mChanges() {
 }
 
 function setupEvents() {
-    document.querySelectorAll('.tf-btn').forEach(btn => btn.addEventListener('click', () => setTimeframe(btn.dataset.tf)));
-    document.querySelectorAll('#listHeader span').forEach(span => span.addEventListener('click', async () => {
-        const field = span.dataset.sort;
-        if (field === 'change30m') await refresh30mChanges();
-        sortBy(field);
-    }));
+    document.querySelectorAll('.tf-btn').forEach(btn => {
+        btn.addEventListener('click', () => setTimeframe(btn.dataset.tf));
+    });
+    document.querySelectorAll('#listHeader span').forEach(span => {
+        span.addEventListener('click', async () => {
+            const field = span.dataset.sort;
+            if (field === 'change30m') await refresh30mChanges();
+            sortBy(field);
+        });
+    });
     document.getElementById('loadMoreBtn').addEventListener('click', loadMoreHistory);
 }
 
 function sortBy(field) {
     if (sortField === field) sortDesc = !sortDesc;
     else { sortField = field; sortDesc = true; }
-    sortCoins(); renderCoinsList();
+    sortCoins();
+    renderCoinsList();
 }
 
 function sortCoins() {
@@ -533,7 +581,8 @@ function sortCoins() {
 }
 
 function renderCoinsList() {
-    const container = document.getElementById('coinsList'); container.innerHTML = '';
+    const container = document.getElementById('coinsList');
+    container.innerHTML = '';
     filteredCoins.forEach(c => container.appendChild(createCoinRow(c)));
 }
 
@@ -545,7 +594,7 @@ function createCoinRow(coin) {
     const c24 = coin.change >= 0 ? 'positive' : 'negative';
     const c30 = coin.change30m >= 0 ? 'positive' : 'negative';
     div.innerHTML = `
-        <span class="coin-symbol">${coin.symbol.replace('USDT','')}</span>
+        <span class="coin-symbol">${coin.symbol.replace('USDT', '')}</span>
         <span class="coin-price">${formatPrice(coin.price)}</span>
         <span class="coin-change ${c24}">${coin.change >= 0 ? '+' : ''}${coin.change.toFixed(2)}%</span>
         <span class="coin-change ${c30}">${coin.change30m >= 0 ? '+' : ''}${coin.change30m.toFixed(2)}%</span>
@@ -563,12 +612,17 @@ function updateCoinRow(coin) {
 
 function selectCoin(symbol) {
     currentSymbol = symbol;
-    document.querySelectorAll('.coin-item').forEach(el => el.classList.toggle('active', el.dataset.symbol === symbol));
+    
+    document.querySelectorAll('.coin-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.symbol === symbol);
+    });
     loadChartData(symbol);
     updateHeader(symbol);
 }
 
-function updateCoinsCount() { document.getElementById('coinsCount').textContent = filteredCoins.length; }
+function updateCoinsCount() {
+    document.getElementById('coinsCount').textContent = filteredCoins.length;
+}
 
 function updateConnectionStatus(ok) {
     const el = document.getElementById('connStatus');
@@ -578,7 +632,9 @@ function updateConnectionStatus(ok) {
 
 function setTimeframe(tf) {
     currentTimeframe = tf;
-    document.querySelectorAll('.tf-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tf === tf));
+    document.querySelectorAll('.tf-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tf === tf);
+    });
     document.getElementById('currentSymbol').textContent = currentSymbol + ' (' + tf + ')';
     loadChartData(currentSymbol);
 }
