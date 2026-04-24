@@ -1,9 +1,5 @@
-// Скринер фьючерсов Binance (исправленные WebSocket URL)
-// Важно! Новые базовые URL согласно обновлению Binance от 23 апреля 2026 г.
-
-// --- 1. Константы ---
-const BINANCE_WS_PUBLIC = 'wss://fstream.binance.com/market/ws';   // Для ликвидаций
-const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/ws';   // Для свечей
+// app.js
+const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/ws';
 const BINANCE_API = 'https://fapi.binance.com';
 
 let coins = new Map();
@@ -171,9 +167,9 @@ function initChart() {
     });
 }
 
-// Подключение к WebSocket ликвидаций (ссылка обновлена!)
+// Подключение к WebSocket ликвидаций (используем /market/)
 function connectLiquidationWebSocket() {
-    liquidationWs = new WebSocket(`${BINANCE_WS_PUBLIC}/!forceOrder@arr`);
+    liquidationWs = new WebSocket(`${BINANCE_WS_MARKET}/!forceOrder@arr`);
     
     liquidationWs.onopen = () => {
         console.log('Liquidation WebSocket connected');
@@ -231,19 +227,19 @@ function saveMarkers(symbol, markers) {
     }
 }
 
-// Обновление ленты ликвидаций в UI
+// Обновление ленты ликвидаций в UI (добавлен onclick для перехода)
 function updateLiquidationFeed() {
     const feedEl = document.getElementById('liquidationFeed');
     if (!feedEl) return;
     if (recentLiquidations.length === 0) {
-        feedEl.innerHTML = '<div style="color: #848e9c; text-align: center;">Ожидание ликвидаций...</div>';
+        feedEl.innerHTML = '<div style="color:#848e9c;text-align:center;">Ожидание ликвидаций...</div>';
         return;
     }
     feedEl.innerHTML = recentLiquidations.map(liq => {
         const sideClass = liq.side === 'SELL' ? 'liq-side-sell' : 'liq-side-buy';
         const sideText = liq.side === 'SELL' ? 'LONG LIQ' : 'SHORT LIQ';
         return `
-            <div class="liquidation-feed-item">
+            <div class="liquidation-feed-item" onclick="selectCoin('${liq.symbol}')" title="Открыть график ${liq.symbol.replace('USDT','')}">
                 <span class="liq-symbol">${liq.symbol.replace('USDT', '')}</span>
                 <span class="${sideClass}">${sideText}</span>
                 <span class="liq-volume">${(liq.volume / 1000).toFixed(0)}K</span>
@@ -415,7 +411,7 @@ async function loadMoreHistory() {
 }
 
 function connectWebSocket() {
-    // Подключаемся к новому market URL
+    // Подключаемся к market/ws и управляем подписками
     ws = new WebSocket(BINANCE_WS_MARKET);
     ws.onopen = () => {
         wsReady = true;
