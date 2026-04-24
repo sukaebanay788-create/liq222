@@ -1,5 +1,6 @@
-// Binance Futures Screener (исправлен heartbeat ликвидаций + стабильный масштаб)
-const BINANCE_WS = 'wss://fstream.binance.com/ws';
+// Binance Futures Screener (исправлены WebSocket URL для новых endpoints Binance)
+const BINANCE_WS_BASE = 'wss://fstream.binance.com/public/ws'; // новый базовый URL для одиночных потоков
+const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/stream'; // для комбинированных потоков
 const BINANCE_API = 'https://fapi.binance.com';
 
 let coins = new Map();
@@ -38,7 +39,7 @@ const MAX_RECENT = 20;
 
 // Heartbeat-механизм для контроля зависания потока ликвидаций (исправлен)
 let liquidationHeartbeat = null;
-const LIQUIDATION_TIMEOUT = 5 * 60 * 1000; // 5 минут без данных -> отправляем LIST_SUBSCRIPTIONS вместо reconnect
+const LIQUIDATION_TIMEOUT = 80 * 1000; // 80 секунд, чтобы не дать Cloudflare разорвать соединение
 
 function getTimeframeMs(tf) {
     const unit = tf.slice(-1);
@@ -174,24 +175,22 @@ function connectLiquidationWebSocket() {
     }
     // Закрываем старое соединение, если оно ещё открыто
     if (liquidationWs && (liquidationWs.readyState === WebSocket.OPEN || liquidationWs.readyState === WebSocket.CONNECTING)) {
-        liquidationWs.onclose = null; // убираем старый обработчик, чтобы избежать повторного reconnect
+        liquidationWs.onclose = null;
         liquidationWs.close();
     }
 
     try {
-        liquidationWs = new WebSocket(`${BINANCE_WS}/!forceOrder@arr`);
+        // Используем новый URL для одиночного потока
+        liquidationWs = new WebSocket(`${BINANCE_WS_BASE}/!forceOrder@arr`);
 
-        // Функция сброса heartbeat-таймера (исправленная)
         function resetHeartbeat() {
             if (liquidationHeartbeat) clearTimeout(liquidationHeartbeat);
             liquidationHeartbeat = setTimeout(() => {
-                // Вместо переподключения просто отправляем LIST_SUBSCRIPTIONS
-                console.warn('No data for 5 min, sending LIST_SUBSCRIPTIONS to keep alive');
+                console.warn('No data for 80s, sending LIST_SUBSCRIPTIONS to keep alive');
                 if (liquidationWs && liquidationWs.readyState === WebSocket.OPEN) {
                     liquidationWs.send(JSON.stringify({ method: 'LIST_SUBSCRIPTIONS', id: Date.now() }));
-                    resetHeartbeat(); // сбрасываем счётчик снова
+                    resetHeartbeat();
                 } else {
-                    // Если по какой-то причине соединение не открыто, переподключаемся
                     console.warn('WebSocket not open, reconnecting...');
                     connectLiquidationWebSocket();
                 }
@@ -447,7 +446,8 @@ async function loadMoreHistory() {
 }
 
 function connectWebSocket() {
-    ws = new WebSocket(BINANCE_WS);
+    // Основное соединение: используем новый URL для динамической подписки
+    ws = new WebSocket(BINANCE_WS_BASE);  // wss://fstream.binance.com/public/ws
     ws.onopen = () => {
         wsReady = true;
         updateConnectionStatus(true);
