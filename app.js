@@ -608,7 +608,10 @@ function updateCoinRow(coin) {
 
 function selectCoin(symbol) {
     currentSymbol = symbol;
-    
+
+    // Мгновенно обновляем заголовок, не дожидаясь загрузки
+    document.getElementById('currentSymbol').textContent = symbol + ' (' + currentTimeframe + ')';
+
     document.querySelectorAll('.coin-item').forEach(el => {
         el.classList.toggle('active', el.dataset.symbol === symbol);
     });
