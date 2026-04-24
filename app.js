@@ -2,7 +2,7 @@
 // Важно! Новые базовые URL согласно обновлению Binance от 23 апреля 2026 г.
 
 // --- 1. Константы ---
-const BINANCE_WS_PUBLIC = 'wss://fstream.binance.com/public/ws';   // Для ликвидаций
+const BINANCE_WS_PUBLIC = 'wss://fstream.binance.com/market/ws';   // Для ликвидаций
 const BINANCE_WS_MARKET = 'wss://fstream.binance.com/market/ws';   // Для свечей
 const BINANCE_API = 'https://fapi.binance.com';
 
