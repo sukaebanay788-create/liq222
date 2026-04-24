@@ -26,8 +26,9 @@ let isLoadingMore = false;
 let liquidationWs = null;
 let liquidationMarkers = [];
 const MAX_MARKERS_PER_SYMBOL = 500;
-const MIN_VOLUME_USD = 10000;      // общий фильтр 10 000
-const MIN_VOLUME_ETH = 50000;     // фильтр для ETHUSDT 50 000
+const MIN_VOLUME_BTC = 100000;   // фильтр для BTCUSDT
+const MIN_VOLUME_ETH = 50000;    // фильтр для ETHUSDT
+const MIN_VOLUME_USD = 10000;    // общий фильтр для остальных
 let liquidationCount = 0;
 
 const allLiquidations = new Map();
@@ -259,7 +260,9 @@ function processLiquidation(order) {
     
     // Определяем порог для символа
     let minVol = MIN_VOLUME_USD;
-    if (symbol === 'ETHUSDT') {
+    if (symbol === 'BTCUSDT') {
+        minVol = MIN_VOLUME_BTC;
+    } else if (symbol === 'ETHUSDT') {
         minVol = MIN_VOLUME_ETH;
     }
     
